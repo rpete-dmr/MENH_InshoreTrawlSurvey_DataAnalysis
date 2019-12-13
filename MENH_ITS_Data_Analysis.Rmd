@@ -1,0 +1,881 @@
+---
+title: "MENH_InshoreTrawlSurvey_Analysis"
+author: "Rebecca Peters"
+date: "12/13/2019"
+output:
+  html_document:
+    df_print: paged
+    toc: yes
+  html_notebook:
+    smooth_scroll: no
+    theme: sandstone
+    toc: yes
+    toc_float: yes
+  pdf_document:
+    toc: yes
+---
+``````{r setup, include=FALSE, warning=F, message=F}
+knitr::opts_chunk$set(echo=T, results="hide", warning=FALSE, message=FALSE, fig.align = 'center')
+```
+
+## Trawl Survey Data Analysis
+
+This document explains how to pull data out from Marvin and run analysis to develop abundance and biomass indices, catch at length indices, and catch/biomass distribution maps for the MENH Inshore Trawl Survey. This code is designed to pull data out from Marvin for one species and only provide indices for that one species. In this example Atlantic cod data is pulled out. If you want to use this code to examine data from another species all you would have to do is change the species ITIS code in this line of code: "species <- "164712"". 
+
+For most of the species caught in the trawl survey catch from all four depth stratum is included in the analysis. Indices for American lobster and winter flounder are generated using catch from depth stratums 1-3. American lobster may be including the fourth depth stratum in the future. Indices for rainbow smelt only uses catch from depth stratums 1 and 2.
+
+## Abundance Indices 
+### Step 1: Load libraries
+
+The first thing to do is load all of the libraries needed to run the code
+```{r, warning=F, message=F}
+library(RODBC)
+library(stringr)
+library(xlsx)
+library(ggplot2)
+library(latticeExtra)
+library(gridExtra)
+library(grid)
+library(lemon)
+library(tidyr)
+library(maps)
+library(mapdata)
+library(devtools)
+library(ggmap)
+library(maps)
+library(grid)
+library(mapdata)
+library(RColorBrewer)
+library(raster)
+library(sp)
+library(dplyr)
+library(ggpubr)
+```
+
+### Step 2: Connect to Marvin
+
+There are multiple ways to connect to Marvin. Below I put the code in that I use to connect to Marvin. Bill has created another way to connect. In this code I am using Marvin64 for the 64bit version of R. If you are using the 32 bit version of R then the dsn will just be MARVIN.
+```{r}
+Marvin=odbcConnect(dsn="MARVIN64", uid="USERNAMEHERE", pwd="PASSWORDHERE")
+```
+
+### Step 3: Pulling out data from Marvin
+
+The code below will pull out all the data needed from Marvin to run the analysis. When you get to the species portion of the code you will realize that I select which species to pull out from the data. You will have to change the Species ITIS code when running this code to get data out of the specific species you want.
+```{r}
+#FIRST you need to pull out the trip data form Marvin
+SurveySql=paste(
+  "select PROJECT_NAME,",
+  "TRIP_SEQ_NO,",
+  "DMR_TRIP_IDENTIFIER,",
+  "TRIP_START_DATE,",
+  "TRIP_END_DATE",
+  "from MARVIN.MV_GFT_TRIP",
+  sep=" "); SurveySql
+
+SurveySql=str_to_upper(SurveySql)
+
+Surveys=sqlQuery(channel=Marvin,
+                 query=SurveySql,
+                 stringsAsFactors=FALSE); summary(Surveys)
+Surveys
+```
+
+Now the columns of the survey data just pulled out willed be change and a string of survey IDs are created to pull these surveys out from the effort table.
+```{r}
+names(Surveys)=c("Project", "SurveyID", "Survey", "StartDate", "EndDate")
+head(Surveys)
+TripString.S=toString(paste("'", sort(unique(Surveys$SurveyID)), "'", sep=""))
+```
+
+Next - run query to pull out effort data from Marvin in the GFT_Effort table and the columns get renamed.
+```{r}
+S.EffortSql=paste(
+  "select TRIP_SEQ_NO,", #SurveyID
+  "EFFORT_SEQ_NO,", #UniqueTowID
+  "DMR_EFFORT_IDENTIFIER,", #TowNum
+  "EFFORT_START_DATE,", #Start_Date
+  "EFFORT_END_DATE,", #End_Date
+  "LENGTH_TOW_TIME,", #Tow_Time
+  "GRID_ID,", #Grid_ID
+  "REGION,", #Region
+  "STRATUM,", #Stratum
+  "START_LATITUDE,", #start_Lat
+  "START_LONGITUDE,", #Start_Lon
+  "END_LATITUDE,", #End_Lat
+  "END_LONGITUDE,", #End_lon
+  "START_DEPTH,", #Start_depth
+  "END_DEPTH,", #End_depth
+  "AVERAGE_DEPTH,", #Avg_depth
+  "STATION_TYPE,", #Station_Code
+  "TOW_LENGTH_NM", #Tow_LengthNM
+  "from MARVIN.MV_GFT_EFFORT",
+  "where TRIP_SEQ_NO in(",TripString.S,")",
+  sep=" "); S.EffortSql
+
+S.Effort=sqlQuery(channel=Marvin,
+                  query=S.EffortSql,
+                  stringsAsFactors=FALSE); summary(S.Effort)
+head(S.Effort) #checking to see what is there#
+
+names(S.Effort)=c("SurveyID", "UniqueTowID", "TowNum", "Start_Date", "End_Date", "Tow_Time",
+                  "Grid_ID", "Region", "Stratum", "start_lat", "start_lon", "end_lat", 
+                  "end_lon","start_depth", "end_depth", "avg_depth", "station_code",
+                  "Tow_LengthNM")
+
+head(S.Effort) #check to see they are renamed#
+```
+
+The survey data pulled out is in the seperate dataframe than the effort data pulled out of Marvin so the dataframes are then merged back together. 
+```{r}
+TrawlSurvey.E=merge(S.Effort, Surveys[ ,c("SurveyID", "Survey")]); head(TrawlSurvey.E)
+```
+
+Species data is queried out from the Marvin Species table and the name of the columns are changed.
+```{r}
+##querying out species names#
+SpeciesSql=paste(
+  "select SPECIES_ITIS_CODE,",
+  "COMMON_NAME,",
+  "SCIENTIFIC_NAME",
+  "from MARVIN.SPECIES",
+  sep=" "); SpeciesSql
+
+Species=sqlQuery(channel=Marvin,
+                 query=SpeciesSql,
+                 stringsAsFactors=FALSE); summary(Species)
+names(Species)=c("Species_Code", "Common_name", "Scientific_name"); head(Species)
+```
+
+**This is where the Species ITIS code is entered for the species of interest. This way catch data for this species is pulled out when the catch query is ran.**
+```{r}
+species <- "164712" #example: Atlantic cod. Change this to the species you want!
+sql_species <- paste("'",species,"'",sep="")
+```
+
+Next the catch data is queried out and column headers are changed. 
+```{r}
+S.CatchSql=paste(
+  "select EFFORT_SEQ_NO,",
+  "CATCH_SEQ_NO,",
+  "DMR_CATCH_IDENTIFIER,",
+  "SPECIES_ITIS_CODE,",
+  "REPORTED_QUANTITY,",
+  "CATCH_WEIGHT,",
+  "CATCH_WEIGHT_TYPE,",
+  "CATCH_WEIGHT_UNIT,",
+  "SUBSAMPLE_WEIGHT,",
+  "WEIGHT_MALES,",
+  "WEIGHT_FEMALES",
+  "from MARVIN.MV_GFT_CATCH",
+  "where species_itis_code=",sql_species); S.CatchSql
+
+S.Catch=sqlQuery(channel=Marvin, query=S.CatchSql, stringsAsFactors=FALSE); summary(S.Catch)
+names(S.Catch)=c("UniqueTowID", "Catch_seq", "DMR_Catch_ID", "Species_Code", "NumberCaught", 
+                 "Weight", "Catch_Weight_Type","Catch_Weight_Unit", "Subsample_Weight",
+                 "Male_weights", "female_weights"); head(S.Catch)
+```
+
+Now these dataframes will be merged together. First the catch dataframe is merged with the species dataframe so the species name is shown in the catch dataframe.
+```{r}
+Catch_data<-merge(Species, S.Catch, by="Species_Code", all.y=TRUE)
+head(Catch_data)
+```
+
+Then the new catch_data dataframe is merged with the effort (TrawlSurvey.E) dataframe. The reason this is done stepwise is to make sure all tows are included in the dataframe, even tows where the species of interest was not caught. You need to have zeros included in the dataframe to get average catch/weight per tow.
+```{r}
+Catch_data.2 <- merge(TrawlSurvey.E, Catch_data, by="UniqueTowID", all.x=TRUE); head(Catch_data.2)
+#next run this code so the data is in ascending order##
+Catch_data.2<-arrange(Catch_data.2, Survey, TowNum, Common_name); head(Catch_data.2)
+```
+
+### Step 4: Editing the data so it can be analyzed
+
+The next step will format the data to change the station_code that is labled NA for non-random alternate to NR so R doesn't think these are actual NA values. Then after that the NA's in the NumberCaught and Weight column are changed to 0 so zero catches are included in the dataframe.
+```{r}
+Catch_data.2$station_code<-as.character(Catch_data.2$station_code)
+Catch_data.2$station_code<-ifelse(is.na(Catch_data.2$station_code), "NR", 
+                                  Catch_data.2$station_code)
+#adding in 0's for the NA in the NumberCaught and weight column to do analysis#
+Catch_data.2$NumberCaught<-ifelse(is.na(Catch_data.2$NumberCaught), "0", Catch_data.2$NumberCaught)
+Catch_data.2$Weight<-ifelse(is.na(Catch_data.2$Weight), "0", Catch_data.2$Weight)
+```
+
+Anywhere in the dataframe where the species of interest was not caught the catch data has NAs in it. The common_name and scientific_name column will have NAs so the common name and scientific name for those species is added into those columns where NAs are present.
+```{r}
+##now add in scientific name instead of NA
+Catch_data.2$Scientific_name<-ifelse(is.na(Catch_data.2$Scientific_name), "Gadus morhua",
+                                     Catch_data.2$Scientific_name)
+##now adding in common name instead of NA#
+Catch_data.2$Common_name<-ifelse(is.na(Catch_data.2$Common_name), "cod atlantic",
+                                 Catch_data.2$Common_name)
+##now rearranging data columns to make more sense#
+Catch_data.2<-Catch_data.2[c("Survey", "TowNum", "Region", "Stratum", "Grid_ID", "Common_name", 
+                             "Scientific_name", "NumberCaught", "Weight", "Catch_Weight_Type", 
+                             "Catch_Weight_Unit", "Subsample_Weight", "Male_weights", 
+                             "female_weights", "station_code", "Start_Date", "End_Date", 
+                             "start_lat", "start_lon", "end_lat", "end_lon", "start_depth", 
+                             "end_depth", "avg_depth", "Tow_Time", "Tow_LengthNM", "SurveyID", 
+                             "Species_Code", "UniqueTowID", "Catch_seq", "DMR_Catch_ID")]
+
+```
+### Step 5: Sum together the catch for species that have two entries in Marvin.
+
+For certain species (American lobster - berried vs other lobsters, alewives - large and small, dogfish - from FL05 to SP13 two seperate entries for male and female dogfish) catches in a tow where they occur are entered into Marvin seperately. The code below will sum those species together and create new columns. Since a new dataframe was created when the data was summed up the new Sums dataframe is merged back with the original Catch_data.2 dataframe so the catch_sum and weight_sum columns are included in the maine dataframe with effort data.
+```{r}
+#need to make sure that the numbercaught and weight column is numeric and if not need to convert them to numeric
+str(Catch_data.2)
+Catch_data.2$NumberCaught<-as.numeric(as.character(Catch_data.2$NumberCaught))
+Catch_data.2$Weight<-as.numeric(as.character(Catch_data.2$Weight))
+
+Sums<-Catch_data.2 %>%
+  group_by(Survey, TowNum, Common_name) %>%
+  summarize(catch_sum = (sum(NumberCaught)), weight_sum=(sum(Weight)))
+Survey_Catch_Sums<-merge(Catch_data.2, Sums, by=c("Survey", "TowNum", "Common_name"), all=TRUE)
+head(Survey_Catch_Sums)
+#in the code below we are rearraning the dataframe so that the columns are in order.
+Survey_Sums<-Survey_Catch_Sums[c("Survey", "TowNum", "Region", "Stratum", "Grid_ID", "Common_name", 
+                                 "Scientific_name", "NumberCaught", "catch_sum", 
+                                 "Weight","weight_sum", "Catch_Weight_Type", "Catch_Weight_Unit", 
+                                 "Subsample_Weight", "Male_weights", 
+                                 "female_weights","station_code","Start_Date", "End_Date", 
+                                 "start_lat", "start_lon", "end_lat", "end_lon", "start_depth", 
+                                 "end_depth", "avg_depth", "Tow_Time", "Tow_LengthNM", "SurveyID", 
+                                 "Species_Code", "UniqueTowID", "Catch_seq", "DMR_Catch_ID")]; 
+Survey_Sums<-arrange(Survey_Sums, Survey, TowNum, Common_name); head(Survey_Sums)
+#now remove columns that are not needed and rename the dataframe.
+Survey_Catch<-select(Survey_Sums, -SurveyID, -Species_Code, -UniqueTowID,  -DMR_Catch_ID)
+head(Survey_Catch)
+```
+
+
+### Step 5: Create a time expansion factor column so you can standardize the catch data to twenty minute tows.
+
+The next step will be to create a new column with a time expasion factor (column name will be Tow_Time_Exp) for any tow that was under or over twenty minutes. If a tow was twenty minutes the expansion factor will be 1. This is needed to standardize the catch data so it can be compared between tows and used in analysis. 
+```{r}
+#The functions below will change the Tow_Time column from the time format it is in
+#to just a regular variable (i.e. from 00:20 to just 20)
+Survey_Catch$Tow_Time<-as.numeric(substring(Survey_Catch$Tow_Time,first=4,last=5)) 
+Survey_Catch$Tow_Time_Exp<-(20/60)/(Survey_Catch$Tow_Time/60)
+#this line of code checks that you have a 20 minute tow after the calculations
+Survey_Catch$Std_dur<-Survey_Catch$Tow_Time_Exp*Survey_Catch$Tow_Time
+head(Survey_Catch)
+```
+
+### Step 6: Standardize catch and weight 
+
+Next you will multiply the catch and weight data by the time expansion factor to create expanded catch and expanded weight columns. The expanded catch and weight is what is used to calculate indices. 
+```{r}
+##now expand all the catch and weight and add in new columns for these expansions.
+Survey_Catch$EXP_Catch<-(Survey_Catch$catch_sum * Survey_Catch$Tow_Time_Exp)
+Survey_Catch$EXP_Weight<-(Survey_Catch$weight_sum * Survey_Catch$Tow_Time_Exp)
+head(Survey_Catch)
+```
+
+### Step 7: Remove data that is not used in the analysis
+
+The line of code below removes fixed and duplicate sites from the dataset since these are not included in the analysis. If you need to remove survey strata you will use similar code but just specify what needs to be removed.
+```{r}
+Strat4_Catch<-subset(Survey_Catch, station_code != "F", station_code != "D")
+Strat4_Catch$Year=as.numeric(paste0("20", substr(Strat4_Catch$Survey, 3, 4)))
+head(Strat4_Catch)
+#example of code to remove another depth stratum
+#Strat3_Catch<-subset(Strat4_Catch, Stratum != "4")
+```
+
+### Step 8: Start calculating mean, variance, and standard deviation of catch and weight by region and stratum
+
+The line of code below calculates the mean, variance, and standard deviation of catch and weight for each survey by region and stratum. This is the first step in calculating stratified mean abundance and biomass.
+```{r}
+Stratum.means<-Strat4_Catch %>%
+  group_by(Survey, Region, Stratum) %>%
+  summarize(average_catch_exp = (mean(EXP_Catch, na.rm=TRUE)), 
+            average_weight_exp=(mean(EXP_Weight, na.rm=TRUE)), 
+            variance_catch_exp = (var(EXP_Catch, na.rm=TRUE)), 
+            variance_weight_exp=(var(EXP_Weight, na.rm=TRUE)), 
+            sd_catch_exp = (sd(EXP_Catch, na.rm=TRUE)), 
+            sd_weight_exp=(sd(EXP_Weight, na.rm=TRUE)),
+            count_catch = (length(na.omit(EXP_Catch))), 
+            count_weight=(length(na.omit(EXP_Weight))))
+
+```
+
+### Step 9: Load in strata area file from the X drive
+
+The code below loads in the csv with the strata area to calculate the abundance and biomass indices. Then this file is merged with the Stratum.means dataframe created above.
+```{r}
+area<-read.csv("X:/Trawl/Abundance Indices/Survey_Area.csv", header=T); head(area)
+names(area)<-c("Region", "Stratum", "Area_sqMI", "Area_Hectare", "Area_SqKM"); head(area)
+
+Avg.includingarea=merge(Stratum.means, area, by=c("Region", "Stratum"), all=TRUE)
+head(Avg.includingarea)
+
+```
+
+### Step 10: Calculate stratum totals and associated variances
+
+The code below calculates the stratum totals by multiplying the average catch and weight caculated in step 8 by the total area survey in each stratum in each region to weight each average by the amount of area surveyed in each strata. 
+Then those weighted averages are summed up by survey to get the total weighted stratified mean for the species in each survey. This is also done for the variance to calculate the uncertainty around the mean.
+```{r}
+StratumTotals <- Avg.includingarea %>%
+  mutate(AverageCatch_byarea = (average_catch_exp * Area_SqKM),
+         AverageWeight_byarea =(average_weight_exp * Area_SqKM),
+         VarCatch_Tst=(((variance_catch_exp)/count_catch) * (Area_SqKM^2)),
+         VarWeight_Tst=(((variance_weight_exp)/count_weight) * (Area_SqKM^2)),
+         catchvar=(variance_catch_exp * (Area_SqKM^2)),
+         weightvar=(variance_weight_exp * (Area_SqKM^2)))
+
+TotalStratMean<-StratumTotals %>%
+  group_by(Survey) %>%
+  summarize(sumof_averageCatchbyarea = (sum(AverageCatch_byarea, na.rm=TRUE)),
+            sumof_averageWeightbyarea=(sum(AverageWeight_byarea, na.rm=TRUE)),
+            sumof_VarCatch = (sum(VarCatch_Tst, na.rm=TRUE)), 
+            sumof_VarWeight = (sum(VarWeight_Tst, na.rm=TRUE)), 
+            sumof_catchvar = (sum(catchvar, na.rm=TRUE)),
+            sumof_weightvar = (sum(weightvar, na.rm=TRUE)))
+head(TotalStratMean)
+```
+
+### Step 11: Calculate the stratified mean abundance and biomass for each survey.
+
+For this the year in addeding in for the following steps.
+
+The year column is needed to seperate out the years where only three strata were surveyed. There were only three depth stratas in the first few years of the survey (2000-2002). Starting in 2003 a fourth depth stratum was added which changed the total survey area. Prior to 2003 the total survey area listed in docouments was 9000.0792 square km. If you add up the three depth stratums in the area file loaded in this script you will notice that the sum is different than the listed area. Since the survey area was updated in 2019 to account for areas of the survey that can no longer be surveyed due to hard bottom, the listed total survey area is used for the surveys from 2000 - 2002 instead of the sum of the three depth stratums. It is unknown how the survey area was calculated prior to 2003 when only three depth stratums were included and how the survey area may have changed once the fourth stratum was added. For these reasons the listed area is used to calculate the abundance indices for the 2000 - 2002 surveys.
+
+To calculate the stratified mean abundance and biomass for each survey you will take the total stratified means calculated above and multiply that by the total survey area to account for the survey area. The variance of the stratified means also needs to be weighted by total survey area. The total survey area for fourth depth stratas (in squareKM) is 11774.98. For three depth stratas it is 9073.245. You can check that is is correct by summing up the Area_SqKM column from the area file loaded in earlier, which is done below.
+
+You will see in this code below that the stratified mean is calculated for four depth stratas. I've included the code for the calculation for when you only need to use three depth strats in the calculation, but it is hashtagged out. If you need this just unhashtag those lines of code and make sure to hashtag the StratMean.4strata out.
+```{r}
+TotalStratMean$Year=as.numeric(paste0("20", substr(TotalStratMean$Survey, 3, 4)))
+
+#check total survey area#
+TotalSurveyArea_4strata<-area %>%
+  summarize(TotalAreaSurveyed_SqKM = sum(Area_SqKM))
+TotalSurveyArea_3strata<-area %>%
+  subset(Stratum != "4") %>%
+  summarize(TotalAreaSurvey_SqKM = sum(Area_SqKM))
+
+StratMean.3strata<- TotalStratMean %>%
+  filter(Year < 2003) %>%
+  mutate(StratMean_Catch = sumof_averageCatchbyarea/9000.0792,
+         StratMean_Weight=sumof_averageWeightbyarea/9000.0792, 
+         varMst_Catch = (sumof_VarCatch/(9000.0792^2)), 
+         varMst_Weight=(sumof_VarWeight/(9000.0792^2)),
+         varforCV_Catch = (sumof_catchvar/(9000.0792^2)), 
+         varforCV_Weight=(sumof_weightvar/(9000.0792^2)))
+
+StratMean.4strata<- TotalStratMean %>%
+  filter(Year >= 2003) %>%
+  mutate(StratMean_Catch = sumof_averageCatchbyarea/11774.98,
+         StratMean_Weight=sumof_averageWeightbyarea/11774.98,
+         varMst_Catch =(sumof_VarCatch/(11774.98^2)), 
+         varMst_Weight=(sumof_VarWeight/(11774.98^2)),
+         varforCV_Catch = (sumof_catchvar/(11774.98^2)),
+         varforCV_Weight=(sumof_weightvar/(11774.98^2)))
+
+##just using three strata below
+#StratMean.3strata.2<- TotalStratMean %>%
+#  filter(Year >= 2003) %>%
+#  mutate(StratMean_Catch = sumof_averageCatchbyarea/9073.245,
+#         StratMean_Weight=sumof_averageWeightbyarea/9073.245,
+#         varMst_Catch =(sumof_VarCatch/(9073.245^2)), 
+#         varMst_Weight=(sumof_VarWeight/(9073.245^2)),
+#         varforCV_Catch = (sumof_catchvar/(9073.245^2)),
+#         varforCV_Weight=(sumof_weightvar/(9073.245^2)))
+
+##now combine these two dataframes using rbind to have all the data in one dataframe##
+AbundanceIndices<-rbind(StratMean.3strata, StratMean.4strata)
+#just for three strata#
+#AbundanceIndices<-rbind(StratMean.3strata, StratMean.3strata.2)
+
+```
+
+### Step 12: Calculating standard error and 95% confidence intervals
+
+The code chunk below will calculate the standard error and confidence interval for each mean and add those columns into the AbundanceIndices dataframe added above. 
+```{r, results='hide'}
+AbundanceIndices$SE_Catch<-(sqrt(AbundanceIndices$varMst_Catch))
+AbundanceIndices$CI_Catch<-2*AbundanceIndices$SE_Catch
+AbundanceIndices$CV_Catch<-(sqrt(AbundanceIndices$varforCV_Catch))/
+  AbundanceIndices$StratMean_Catch
+AbundanceIndices$SE_Weight<-(sqrt(AbundanceIndices$varMst_Weight))
+AbundanceIndices$CI_Weight<-2*AbundanceIndices$SE_Weight
+AbundanceIndices$CV_Weight<-(sqrt(AbundanceIndices$varforCV_Weight))/
+  AbundanceIndices$StratMean_Weight
+AbundanceIndices$Low_CI_Catch<-(AbundanceIndices$StratMean_Catch - AbundanceIndices$CI_Catch)
+AbundanceIndices$High_CI_Catch<-(AbundanceIndices$StratMean_Catch + AbundanceIndices$CI_Catch)
+AbundanceIndices$Low_CI_Weight<-(AbundanceIndices$StratMean_Weight - AbundanceIndices$CI_Weight)
+AbundanceIndices$High_CI_Weight<-(AbundanceIndices$StratMean_Weight + AbundanceIndices$CI_Weight)
+head(AbundanceIndices)
+```
+
+
+After adding in those columns you will take out the columns not needed in the dataframe and arrange the column in logical order for exporting purposes. 
+```{r}
+Trawl.Indices<-dplyr::select(AbundanceIndices, -sumof_averageCatchbyarea,
+                             -sumof_averageWeightbyarea, -sumof_VarCatch,
+                             -sumof_VarWeight, -sumof_VarCatch, -sumof_VarWeight)
+Trawl.Indices<-Trawl.Indices[c("Survey", "StratMean_Catch","CV_Catch", "SE_Catch", "Low_CI_Catch", 
+                               "High_CI_Catch", "varMst_Catch", "StratMean_Weight", "CV_Weight",
+                               "SE_Weight", "Low_CI_Weight", "High_CI_Weight", "varMst_Weight")]
+Trawl.Indices<-arrange(Trawl.Indices, Survey); head(Trawl.Indices)
+#write.xlsx(Trawl.4strata.indices, file="SPECIESNAME_indicessupport.xlsx", col.names=TRUE,
+#row.names=TRUE, append=FALSE)
+```
+
+
+### Step 13: Add in new columns for plotting and plot the indices
+
+The first thing you'll need is to add in a season and year column to seperate the plots by season and have an x axis by year
+```{r}
+Trawl.Indices$Season <- substring(Trawl.Indices$Survey,first=1,last=2)
+head(Trawl.Indices)
+Trawl.Indices$Year<-as.numeric(paste0("20", substring(Trawl.Indices$Survey, 3, 4)))
+```
+
+Then you'll use ggplot to plot indices by season. For each season there will be two graphs on one large plot. The abundance indces will be on the top and the biomass indices will be on the bottom. For each different species you'll have to adjust the y axis to make it look the way you want. You can choose to edit these however you wish.
+#### Spring plot:
+```{r, fig.height=6}
+Spring<-subset(Trawl.Indices, Season=="SP")  
+SpringCatch<-ggplot(data=Spring, aes(x=Year, y=StratMean_Catch)) + geom_line( size=1) +
+  geom_ribbon(aes(ymin=Low_CI_Catch, ymax=High_CI_Catch), linetype=2, alpha=0.2) + 
+  theme_bw() + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) +
+  scale_x_continuous(name="", breaks=c(2000:2019)) +
+  geom_point(colour="#000000")  + 
+  theme(axis.text.x = element_text(color="#000000", size=10, angle=90), 
+        axis.text.y = element_text(color="#000000", size=10)) +
+  theme(axis.title.x = element_text(size=11, face="bold")) +
+  theme(axis.title.y=element_text(size=11, face="bold")) + 
+  scale_y_continuous(name="Stratified Mean Catch (Number/Tow)",
+                     breaks=seq(0, 12, 2),limits=c(-1,13),oob=scales::rescale_none)
+
+SpringWeight<-ggplot(data=Spring, aes(x=Year, y=StratMean_Weight)) +
+  geom_line(linetype=2, size=1) + 
+  geom_ribbon(aes(ymin=Low_CI_Weight, ymax=High_CI_Weight), linetype=2, alpha=0.2)+
+  theme_bw() + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) +
+  scale_x_continuous(name="Year", breaks=c(2000:2019)) +
+  geom_point(colour="#000000")  + 
+  theme(axis.text.x = element_text(color="#000000", size=10, angle=90), axis.text.y = 
+          element_text(color="#000000", size=10)) +
+  theme(axis.title.x = element_text(size=11, face="bold")) +
+  theme(axis.title.y=element_text(size=11, face="bold")) + 
+  scale_y_continuous(name="Stratified Mean Weight (KG/Tow)", breaks=seq(0, 6, 1),
+                     limits=c(-0.5,6), oob=scales::rescale_none)
+
+titlespring=textGrob(expression(paste("Spring", italic(" Scientific name "), "Indices")), gp=gpar(fontface="bold", fontsize=14))
+grid.arrange(SpringCatch, SpringWeight, ncol=1, top=titlespring)
+```
+
+#### Fall plot:
+```{r, fig.height=6}
+Fall<-subset(Trawl.Indices, Season=="FL")
+Fallcatch<-ggplot(data=Fall, aes(x=Year, y=StratMean_Catch)) + geom_line( size=1) +
+  geom_ribbon(aes(ymin=Low_CI_Catch, ymax=High_CI_Catch), linetype=2, alpha=0.2) +
+  theme_bw() + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) +
+  scale_x_continuous(name="", breaks=c(2000:2019)) +
+  geom_point(colour="#000000")  + 
+  theme(axis.text.x = element_text(color="#000000", size=10, angle=90), 
+        axis.text.y = element_text(color="#000000", size=10)) +
+  theme(axis.title.x = element_text(size=11, face="bold")) +
+  theme(axis.title.y=element_text(size=11, face="bold")) +
+  scale_y_continuous(name="Stratified Mean Catch (Number/Tow)",
+                     breaks=seq(0,9, 1), limits=c(0,9), oob=scales::rescale_none)
+
+Fallweight<-ggplot(data=Fall, aes(x=Year, y=StratMean_Weight)) + geom_line(size=1, linetype=2) +
+  geom_ribbon(aes(ymin=Low_CI_Weight, ymax=High_CI_Weight), linetype=2, alpha=0.2) +
+  theme_bw() + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) +
+  scale_x_continuous(name="Year", breaks=c(2000:2019)) +
+  geom_point(colour="#000000")  + 
+  theme(axis.text.x = element_text(color="#000000",size=10, angle=90), 
+        axis.text.y = element_text(color="#000000", size=10)) +
+  theme(axis.title.x = element_text(size=11, face="bold")) +
+  theme(axis.title.y=element_text(size=11, face="bold")) + 
+  scale_y_continuous(name="Stratified Mean Weight (KG/Tow)", breaks=seq(-0.5, 6, 1), 
+                     limits=c(-0.5,6), oob=scales::rescale_none)
+titlefall=textGrob(expression(paste("Fall", italic(" Scientific name "), "Indices")), gp=gpar(fontface="bold", fontsize=14))
+grid.arrange(Fallcatch, Fallweight, ncol=1, top=titlefall)
+```
+
+## Catch at Length
+
+The next part of this document will show how to pull out the length data from Marvin, edit it, and then calculate catch at length for each species. Remember this example is based on atlantic cod.
+
+### Step 1: Pull out the length data from the sample table in Marvin
+
+The code below will pull out the sample data from Marvin and rename the columns.
+```{r, warning=F, message=F}
+S.SampleSql=paste(
+  "select CATCH_SEQ_NO,",
+  "SAMPLE_SEQ_NO,",
+  "DMR_SAMPLE_IDENTIFIER,",
+  "FREQUENCY,",
+  "SAMPLE_LENGTH,",
+  "SAMPLE_LENGTH_UNIT,",
+  "SAMPLE_WEIGHT,",
+  "SAMPLE_TYPE,",
+  "SEX,",
+  "MATURITY_TYPE",
+  "from MARVIN.MV_GFT_SAMPLE",
+  sep=" "); S.SampleSql
+S.Sample=sqlQuery(channel=Marvin, query=S.SampleSql, stringsAsFactors=FALSE)
+summary(S.Sample)
+head(S.Sample)
+names(S.Sample)=c("Catch_seq", "Sample_ID", "DMR_SampID", "Frequency", "Length", "Unit_Len",
+                  "Weight", "SampleType", "Sex", "Maturity")
+```
+
+You'll then need to specify that you want length frequency data from the data you pulled out. The sample table also inclue Bio (maturity data) and Lob (lobster data) as sample types. To get the length frequency data for most species besides lobster and shrimp then you'll want to run the code below.
+```{r}
+S.Sample.LF<-subset(S.Sample, SampleType=="LF")
+```
+
+
+One you pull it you'll then merge the new length frequency dataframe with the Strat4_Catch dataframe created when you pull out and edited the catch data. After you merge you can take out the columns that aren't needed in the dataframe. This way you'll only be working with length data for the species that you want.
+```{r}
+Lengths_Survey <- merge(Strat4_Catch, S.Sample.LF, by="Catch_seq", all.x=TRUE)
+Len.Survey<-select(Lengths_Survey, -Grid_ID, -Catch_Weight_Type, -Catch_Weight_Unit, -Male_weights,
+                   -female_weights, - Start_Date, -End_Date, -start_lat, - start_lon, -end_lat,
+                   -end_lon, -start_depth, -end_depth, -avg_depth, -Sample_ID, -DMR_SampID)
+head(Len.Survey)
+
+```
+
+### Step 2: Expand the frequency column to standardize data to a 20 minute tow and account for any subsample taken
+
+None of the length data is "expanded" or weighted to account for any subsample taken. You'll have to do that first then expand the data again to account for any tow that is under or over 20 minutes. This will standardize the length frequency data so it can then be used for analysis.
+
+You'll first create an expandsion factor for any subsample taken. If no subsample was taken this expand factor will just be 1. Some columns will end up having NAs in them and you'll have to add 1 into that column so you can get averages. You can then remove the first ExpandFactor column created since the LenExpandFactor will have your subsample expansion factor in it.
+```{r}
+Len.Survey$ExpandFactor<-ifelse(Len.Survey$Subsample_Weight > 0,
+                                Len.Survey$Weight.x/Len.Survey$Subsample_Weight, 1)
+Len.Survey$LenExpandFactor<-ifelse(is.na(Len.Survey$ExpandFactor), 1, 
+                                   Len.Survey$ExpandFactor)
+Len.Survey<-select(Len.Survey, -ExpandFactor)
+head(Len.Survey)
+```
+
+You'll then want to make sure that the Frequency column is being read as numeric. Since it isn't the column is changed to numeric so this column can be edited. Then the frequency column will be multiplied by the LenExpandFactor to weight the frequency for any subsample and a new column is created (WeightedFreq1).
+```{r}
+str(Len.Survey) #check how R is reading in the data, all need to be numeric to do calculcations
+Len.Survey$Frequency<-as.numeric(Len.Survey$Frequency)
+Len.Survey$WeightedFreq1<-(Len.Survey$Frequency * Len.Survey$LenExpandFactor)
+```
+
+After the frequency column is exapnded to account for subsample you'll then have to expand the next expanded frequency by the tow time expansion factor created when expanding the catch data. This way the frequency will be weighted to standardize the frequency of each length caught to a 20 minute tow.
+```{r}
+Len.Survey$WeightedFreq<-(Len.Survey$WeightedFreq1*Len.Survey$Tow_Time_Exp)
+```
+
+You can then remove the first WeightedFreq1 column so you are just working with the total weighted freuqency column (WeightedFreq) in the analysis.
+```{r}
+Len.Survey<-select(Len.Survey, -WeightedFreq1)
+```
+
+### Step 3: Sum up the length frequency
+
+Next we'll have to sum up the length frquency by survey, region, stratum, and length so we have the total number caught at each length in each stratum in each region of each survey. There are some NAs that will also need to be omitted.
+```{r}
+Len_sum<-Len.Survey %>%
+  group_by(Survey, Region, Stratum, Length) %>%
+  summarize(sum_Wfreq = (sum(WeightedFreq, na.rm=TRUE)))
+Len_sum<-na.omit(Len_sum); head(Len_sum)
+```
+
+### Step 4: Calculate the average catch at each length 
+
+Due to how the data is pulled out and merged in this code we need to sum up the total number of tows in each strata in each region of each survey. This way we'll be able to get an average number of each length caught in each strata of each region of each survey.
+
+First get the total number of tows completed in each depth strata in each region of each survey
+```{r}
+Count<-Strat4_Catch %>%
+  group_by(Survey, Region, Stratum) %>%
+  summarize(count = (length(na.omit(EXP_Catch)))); head(Count)
+
+```
+
+Then merge that dataframe with the Len_sum dataframe and divide the sum_wFreq column by the new count column so we can get an average. This average is needed to continue with calculation a stratified catch at length.
+```{r}
+Len_sum_withCount<-merge(Len_sum, Count, by=c("Survey", "Region", "Stratum"), all.x=TRUE)
+Len_sum_withCount$MeanCatchPerTow<-(Len_sum_withCount$sum_Wfreq/Len_sum_withCount$count)
+
+```
+
+### Step 5: Weight the average catch at each length by the area sampled in each strata in the survey.
+
+The new Len_sum_withCount dataframe will be merged with the area dataframe that was loaded in earlier.
+```{r}
+Len_sum_withArea=merge(Len_sum_withCount, area, by=c("Region", "Stratum"), all=TRUE)
+head(Len_sum_withArea)
+
+```
+This creates a new dataframe where area is included in it. Then the MeanCatchPerTow column of the dataframe is multiplied by the Area_sqKM to weight the average catch at each length by the area sampled.
+```{r}
+Len_sum_withArea$StratumMean<-(Len_sum_withArea$Area_SqKM*Len_sum_withArea$MeanCatchPerTow)
+```
+
+
+### Step 6: Calculate stratified totals for length frequency
+
+Next the weighted average frequency is summed up by survey and length and a year column is added into the dataframe so we can calculate stratified mean catch at length after this.
+```{r}
+Len_stratMeanSum<-Len_sum_withArea %>%
+  group_by(Survey, Length) %>%
+  summarize(sum_stratMean = (sum(StratumMean)))
+Len_stratMeanSum$Year=as.numeric(paste0("20", substr(Len_stratMeanSum$Survey, 3, 4)))
+head(Len_stratMeanSum)
+
+```
+### Step 7: Calculate stratified mean catch at length
+ 
+This step is the same as when calculating stratified mean catch and biomass. Please see that step to read out why the code is formatted this year (Survey area in year 2000-2002 are different than survey area 2003 and forward).
+
+The summed up weighted average catch at lenght is now multiplied by total survey area for stratified mean catch at length.
+```{r}
+CatchatLen.3strata<- Len_stratMeanSum %>%
+  filter(Year < 2003) %>%
+  mutate(Catch= sum_stratMean/9000.0792)
+
+CatchatLen.4strata<- Len_stratMeanSum %>%
+  filter(Year >= 2003) %>%
+  mutate(Catch = sum_stratMean/11774.98)
+#merge these two together
+Catch.at.Length<-rbind(CatchatLen.3strata, CatchatLen.4strata); head(Catch.at.Length)
+```
+### Step 8: Plotting
+
+You'll first want to create a season column to sepearte plots out by season
+```{r}
+Catch.at.Length$Season <- substring(Catch.at.Length$Survey,first=1,last=2)
+```
+
+Then you can make the plots by season
+A few items will need to be edited in this plot like changing the x axis breaks depending on what species is being plotted out, remove the hashtag to edit the y scale to make the plot cleaner, and add in the scientific name of the species in the title.
+#### Spring plot:
+```{r, fig.height=10, fig.width=8}
+Spring.Len<-subset(Catch.at.Length, Season=="SP")
+ggplot(Spring.Len, aes(x=Length, y=Catch)) +
+  facet_rep_wrap(~Year, repeat.tick.labels='bottom') + geom_bar(stat="identity", color="#000000") +
+  theme_classic() + scale_x_continuous(name="Length (CM)", breaks=seq(0, 100, 10), 
+                                       limits=c(0,100)) +
+  theme(axis.text.x = element_text(color="#000000", size=9, angle=90),
+        axis.text.y = element_text(color="#000000", size=9)) + 
+  #scale_y_continuous(breaks=seq(0,1, .10), limits=c(0,1)) +#
+  theme(axis.title.x = element_text(size=11, face="bold")) +
+  theme(axis.title.y=element_text(size=11, face="bold")) + ylab("Catch") +
+  ggtitle(expression(paste("Spring", italic(" SCIENTIFIC NAME "), "Catch at Length"))) +
+  theme(plot.title = element_text(hjust = 0.5)) 
+```
+#### Fall plot:
+```{r, fig.height=10, fig.width=8}
+Fall.Len<-subset(Catch.at.Length, Season=="FL")
+ggplot(Fall.Len, aes(x=Length, y=Catch)) +
+  facet_rep_wrap(~Year, repeat.tick.labels='bottom') + geom_bar(stat="identity", color="#000000") +
+  theme_classic() + scale_x_continuous(name="Length (CM)",
+                                       breaks=seq(0, 100, 10), limits=c(0,100)) +
+  theme(axis.text.x = element_text(color="#000000", size=9, angle=90),
+        axis.text.y = element_text(color="#000000", size=9)) +
+  #scale_y_continuous( breaks=seq(0, 1, .10)) +
+  theme(axis.title.x = element_text(size=11, face="bold")) +
+  theme(axis.title.y=element_text(size=11, face="bold")) + ylab("Catch") +
+  ggtitle(expression(paste("Fall", italic(" SCIENTIFIC NAME "), "Catch at Length"))) +
+  theme(plot.title = element_text(hjust = 0.5)) 
+
+```
+
+## Creating Distribution Maps
+
+The code below will allow you to plot the catch and weight of the species in each tow on a map. This way you can see the distribution of the catch over the survey area.
+
+### Step 1: Load in needed libraries
+```{r, warning=F, message=F}
+library(rgdal)
+library(maptools)
+library(tidyverse)
+library(sf)
+library(rnaturalearth)
+library(viridis)
+library(hrbrthemes)
+library(here)
+library(rgeos)
+library(sp)
+```
+
+### Step 2: create new dataframe from the Strat4_Catch dataframe to only have a dataframe with the required columns
+```{r}
+Dist.map<-select(Strat4_Catch, Survey, Region, Stratum, Common_name, Scientific_name, start_lat, start_lon, EXP_Catch, EXP_Weight, Year); head(Dist.map)
+```
+
+
+### Step 3: Load in the map
+
+This code was written by Bill DeVoe and loads in a map of the northeast.
+```{r}
+fgdb <- "Z:/GIS/gdb/dataZ.gdb"
+
+# List all feature classes in a file geodatabase (slow for large GDBs)
+fc_list <- rgdal::ogrListLayers(fgdb)
+print(fc_list)
+
+# Read specific feature classes and project to lat lon (Maine outline, states poly, Canada)
+lyrs <- c("stateoutline", "USA_States", "Canada_Provinces")
+sapply(lyrs, function(x) {
+  WGS84 = "+init=epsg:4326" #lat lon
+  lyr <- rgdal::readOGR(dsn=fgdb,layer=x)
+  lyr <- sp::spTransform(lyr, CRS(WGS84))
+  assign(x, lyr, envir = .GlobalEnv)
+})
+
+# Feature classes are now WGS84 SP objects of same name as FC in Global Environment
+
+# Merge into one coast for NE
+can_east <- subset(Canada_Provinces, NAME == 'New Brunswick' |
+                     NAME == 'Nova Scotia' |
+                     NAME == 'Quebec' |
+                     NAME == 'Newfoundland',
+                   select = NAME)
+states_list <- c('NH')
+east_states <- subset(USA_States, STATE_ABBR %in% states_list, select = STATE_ABBR)
+
+ne_coast <- raster::union(can_east, east_states) %>%
+  raster::union(., stateoutline)
+plot(ne_coast)
+maine_df<-fortify(ne_coast)
+```
+
+### Step 4: Plots
+
+A season column is added at first so you can plot by season.
+```{r}
+Dist.map$Season<-substring(Dist.map$Survey,first=1,last=2)
+```
+
+This example will only plot one survey year on the map for each season. This means the survey needs to be subsetting out so ony the specific year is plotted.
+
+#### Spring map:
+```{r}
+SP18<-subset(Dist.map, Survey=="SP18")
+shapes=("shape2" = 4)
+SP18.plot.catch<-ggplot() + 
+  geom_polygon(data=maine_df, aes(long, lat, group=group),
+               color = "grey10", fill="grey60", size=.3) +
+  coord_quickmap(xlim = c(-66.5, -71.5), ylim = c(42.8, 45.5), expand = F) + 
+  expand_limits(x = c(-64, -72), y = c(42, 48)) + theme_classic() +
+  xlab("Longitude")+ ylab("Latitude") + 
+  geom_point(data=filter(SP18, EXP_Catch!="0"),aes(x=start_lon, y=start_lat, size=EXP_Catch),
+             shape=21, fill="red", alpha=.8) + 
+  geom_point(data=filter(SP18, EXP_Catch=="0"), aes(x=start_lon, y=start_lat, shape="shape2"),
+             colour="black")  + 
+  scale_size_area(name="Number/tow", max_size=10, breaks=c(1, 5, 10, 15))  +
+  scale_shape_manual(name="",  values=c(4), labels=c("None caught")) +
+  theme(panel.background= element_rect(fill="#FFFFFF")) +  
+  theme(axis.title.y=element_text(size=11, face="bold"), 
+        axis.title.x=element_text(size=11, face="bold")) + theme(legend.position="right") +
+  guides(size=guide_legend(order=1), shape=guide_legend(order=2),
+         size=guide_legend(title="Number/tow"), shape=guide_legend(title = NULL)) +
+  theme(legend.margin=margin(-1,0,0,-0.3, unit="cm"))
+SP18.plot.catch
+```
+
+#### Fall map:
+```{r}
+FL18<-subset(Dist.map, Survey=="FL18")
+shapes=("shape2" = 4)
+FL18.plot.catch<-ggplot() + 
+  geom_polygon(data=maine_df, aes(long, lat, group=group), 
+               color = "grey10", fill="grey60", size=.3) + 
+  coord_quickmap(xlim = c(-66.5, -71.5), ylim = c(42.8, 45.5), expand = F) + 
+  expand_limits(x = c(-64, -72), y = c(42, 48)) + theme_classic() +
+  xlab("Longitude")+ ylab("Latitude") +  
+  geom_point(data=filter(FL18, EXP_Catch!="0"), 
+             aes(x=start_lon, y=start_lat, size=EXP_Catch), 
+             shape=21, fill="blue", alpha=.7) + 
+  geom_point(data=filter(FL18, EXP_Catch=="0"), 
+             aes(x=start_lon, y=start_lat, shape="shape2"), colour="black")  + 
+  scale_size_area(name="Number/tow", max_size=10, breaks=c(1, 10, 20 ,30, 40))  +
+  scale_shape_manual(name="",  values=c(4), labels=c("None caught")) +
+  theme(panel.background= element_rect(fill="#FFFFFF")) +  
+  theme(axis.title.y=element_text(size=11, face="bold"),
+        axis.title.x=element_text(size=11, face="bold")) + 
+  theme(legend.position="right") +
+  guides(size=guide_legend(order=1), shape=guide_legend(order=2),
+         size=guide_legend(title="Number/tow"), shape=guide_legend(title = NULL)) +
+  theme(legend.margin=margin(-1,0,0,-0.3, unit="cm"))
+FL18.plot.catch
+```
+
+#### Facet wrap maps
+The code below uses the facet wrap function in ggplot to show distribution maps for all surveys on one panel
+
+##### Spring
+```{r, fig.width=8, fig.height=7}
+SP<-subset(Dist.map, Season=="SP"); 
+#SPbreaks<-c(0, 100, 500, 1000, 5000, 8000, 11000, 16000, 30000)
+Spring<-ggplot() + 
+  geom_polygon(data=maine_df, aes(long, lat, group=group), 
+               color = "grey10", fill="grey60", size=.3) + 
+  coord_quickmap(xlim = c(-66.5, -71.5), ylim = c(42.8, 45.5), expand = F) +
+  expand_limits(x = c(-64, -72), y = c(42, 48)) + theme_classic() + 
+  facet_wrap(~Year, ncol=4) +
+  xlab("Longitude")+ ylab("Latitude") + 
+  geom_point(data=filter(SP, EXP_Catch!="0"), 
+             aes(x=start_lon, y=start_lat, size=EXP_Catch), shape=21, fill="red", alpha=.8) + 
+  geom_point(data=filter(SP, EXP_Catch=="0"), 
+             aes(x=start_lon, y=start_lat, shape="shape2"), colour="black")  + 
+  scale_size_area(name="Number/tow", max_size=10)  + 
+  scale_shape_manual(name="",  values=c(4), labels=c("None caught")) +
+  theme(panel.background= element_rect(fill="#FFFFFF")) +  
+  theme(axis.title.y=element_text(size=11, face="bold"), 
+        axis.title.x=element_text(size=11, face="bold")) +
+  theme(legend.position="right") +
+  guides(size=guide_legend(order=1), shape=guide_legend(order=2),
+         size=guide_legend(title="Number/tow"), shape=guide_legend(title = NULL)) +
+  theme(legend.margin=margin(-1,0,0,-0.3, unit="cm")) 
+Spring
+```
+##### Fall
+```{r, fig.width=8, fig.height=7, results='hide'}
+FL<-subset(Dist.map, Season=="FL")
+#FLbreaks<-c(0, 100, 500, 1000, 5000, 8000, 11000, 16000, 20000)
+Fall<-ggplot() + 
+  geom_polygon(data=maine_df, aes(long, lat, group=group), 
+               color = "grey10", fill="grey60", size=.3) + 
+  coord_quickmap(xlim = c(-66.5, -71.5), ylim = c(42.8, 45.5), expand = F) +
+  expand_limits(x = c(-64, -72), y = c(42, 48)) + theme_classic() + 
+  facet_wrap(~Year, ncol=4) +
+  xlab("Longitude")+ ylab("Latitude") +  
+  geom_point(data=filter(FL, EXP_Catch!="0"), 
+             aes(x=start_lon, y=start_lat, size=EXP_Catch), 
+             shape=21, fill="red", alpha=.8) + 
+  geom_point(data=filter(FL, EXP_Catch=="0"), 
+             aes(x=start_lon, y=start_lat, shape="shape2"), 
+             colour="black")  + 
+  scale_size_area(name="Number/tow", max_size=10)  + 
+  scale_shape_manual(name="",  values=c(4), labels=c("None caught")) +
+  theme(panel.background= element_rect(fill="#FFFFFF")) +  
+  theme(axis.title.y=element_text(size=11, face="bold"), 
+        axis.title.x=element_text(size=11, face="bold")) + 
+  theme(legend.position="right") +
+  guides(size=guide_legend(order=1), shape=guide_legend(order=2),
+         size=guide_legend(title="Number/tow"), shape=guide_legend(title = NULL)) +
+  theme(legend.margin=margin(-1,0,0,-0.3, unit="cm"))
+Fall
+```
+
+## Maturity (Bio) Sample Data Pull
+
+Ony select species have age, sex, and maturity information taken on them (labeled as BIO data in Marvin). These species include: Cod, Haddock, Monkfish, Winter Flounder, American Plaice, Witch Flounder, Yellowtail Flounder, White Hake, and Halibit (only from some surveys).
+
+The sample data is already queried out from when it was pulled out for length so all that is needed is to subset that dataframe for BIO data instead of LF data. Then the Bio dataframe is merged back with the Strat4_Catch data.
+```{r, warning=F, message=F, results='hide'}
+S.Sample.Bio<-subset(S.Sample, SampleType=="Bio")
+Bio_Survey <- merge(Strat4_Catch, S.Sample.Bio, by="Catch_seq", all.x=TRUE)
+head(Bio_Survey)
+```
+
+
+## Documents explaining calculation of stratified means
+These are just a few helpful links for if you want to learn more about calculating means from a stratified random survey.
+
+https://archive.nafo.int/open/studies/s28/smith.pdf
+
+http://www.fao.org/3/y5228e/y5228e06.htm
